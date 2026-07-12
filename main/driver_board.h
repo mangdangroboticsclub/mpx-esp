@@ -50,7 +50,7 @@ extern "C" {
  * offset[] calibration all address the same servo by the same id. Set
  * SERVO_BOARD and re-flash to switch builds.
  * ---------------------------------------------------------------------- */
-#define SERVO_BOARD 1
+#define SERVO_BOARD 3
 
 static inline int db_phys(int logical){
 #if SERVO_BOARD == 2

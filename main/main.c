@@ -205,7 +205,8 @@ static void cli_exec(char *cmd){
                    "  <id 1-12> stop               idle, motor off\n"
                    "  <id 1-12> fb                 present position + current\n"
                    "  dump              all 12 servos\n"
-                   "  trace <id>        live position/current view (trace off = stop)\n"
+                   "  trace <id> [hz]   live position/current + ESP timestamp (default 10Hz,\n"
+                   "                    up to 200Hz; e.g. 'trace 2 50'; 'trace off' to stop)\n"
                    "  sweep [id low high hold_ms cycles hz]  PID step test -> CSV\n"
                    "                    (serial only, needs 'cli on'; default: 2 100 200 800 3 50)\n"
                    "  swalk [secs hz vx id...]  Stanford-walk PID trace -> CSV\n"
@@ -329,17 +330,22 @@ static void cli_exec(char *cmd){
  * Runs as its own task; stdin is polled non-blocking (works on the UART
  * console and on USB-Serial-JTAG).                                        */
 static int TraceId = 0;                 /* 0 = off, 1-12 = servo being traced */
+static uint32_t TracePeriodMs = 100;    /* sample period; 100ms = 10Hz default */
 
 static void trace_print_line(int id){
     static const char *mn[] = {"IDLE","POS ","TOR ","IK  "};
+    /* ESP timestamp in ms (0.1 ms resolution) so you can compute speed/RPM
+     * by hand: RPM = (now2 - now1) deg / (t2 - t1) ms * 1000 / 6.            */
+    double t_ms = (double)esp_timer_get_time() / 1000.0;
     float lv[DB_LIVE_COUNT];
     bool ok = true;
     for(int i=0; i<DB_LIVE_COUNT && ok; i++)
         ok = driver_board_get_live(id, i, &lv[i]);
     if(ok){
         int m = (int)lv[DB_LIVE_MODE];
-        printf("pos s/n/e %6.1f/%6.1f/%5.1f deg | cur c/s/n/e %4.0f/%4.0f/%4.0f/%4.0f mA"
+        printf("t=%10.1f ms | pos s/n/e %6.1f/%6.1f/%5.1f deg | cur c/s/n/e %4.0f/%4.0f/%4.0f/%4.0f mA"
                " | duty %5.1f%% | adc %4.0f/%4.0f | %s | loop %lu\n",
+               t_ms,
                lv[DB_LIVE_SETPOINT_POS_DEG], lv[DB_LIVE_PRESENT_POS_DEG],
                lv[DB_LIVE_ERROR_POS_DEG],
                lv[DB_LIVE_MAX_CURRENT_MA], lv[DB_LIVE_SETPOINT_CUR_MA],
@@ -348,9 +354,9 @@ static void trace_print_line(int id){
                lv[DB_LIVE_POS_ADC], lv[DB_LIVE_CUR_ADC],
                (m>=0&&m<4)?mn[m]:"?", (unsigned long)lv[DB_LIVE_LOOP_COUNTER]);
     }else if(driver_board_poll(id)){
-        printf("pos %4u SCS  cur %5d mA  (basic - old AT32 fw)\n",
-               driver_board_present_position(id), driver_board_present_current(id));
-    }else printf("SPI poll failed\n");
+        printf("t=%10.1f ms | pos %4u SCS  cur %5d mA  (basic - old AT32 fw)\n",
+               t_ms, driver_board_present_position(id), driver_board_present_current(id));
+    }else printf("t=%10.1f ms | SPI poll failed\n", t_ms);
 }
 
 /* ---- automated step-response sweep for PID tuning (serial CLI) ----------
@@ -502,13 +508,22 @@ static void serial_handle_line(char *line){
         else printf("trace is not running\n");
         return;
     }
-    int tid;
-    if(sscanf(line,"trace %d",&tid)==1){
+    int tid, thz = 0;
+    int tn = sscanf(line,"trace %d %d",&tid,&thz);
+    if(tn >= 1){
         if(tid<1 || tid>12){ printf("bad servo id\n"); return; }
         if(!CliMode){ printf("run 'cli on' first (gait would fight the SPI bus)\n"); return; }
+        if(tn >= 2 && thz > 0){
+            if(thz > 200) thz = 200;              /* SPI/GET_LIVE caps it anyway */
+            TracePeriodMs = 1000u / (uint32_t)thz;
+            if(TracePeriodMs < 1) TracePeriodMs = 1;
+        }else{
+            TracePeriodMs = 100;                  /* default 10 Hz */
+        }
         TraceId = tid;
-        printf("TRACE ON servo %d at 10 Hz - commands still work while it runs.\n"
-               "stop with 'trace off' or press 'q' on an empty line\n", tid);
+        printf("TRACE ON servo %d at ~%lu Hz - commands still work while it runs.\n"
+               "stop with 'trace off' or press 'q' on an empty line\n",
+               tid, (unsigned long)(1000u / TracePeriodMs));
         return;
     }
     if(!CliMode && strcmp(line,"help")!=0)
@@ -530,13 +545,13 @@ static void console_task(void *arg){
         if(c == EOF){
             if(TraceId){
                 uint32_t now = millis();
-                if(now - last_trace_ms >= 100){   /* 10 Hz live stream */
+                if(now - last_trace_ms >= TracePeriodMs){   /* rate set by 'trace <id> [hz]' */
                     last_trace_ms = now;
                     trace_print_line(TraceId);
                     fflush(stdout);
                 }
             }
-            vTaskDelay(pdMS_TO_TICKS(20));
+            vTaskDelay(pdMS_TO_TICKS(TraceId ? 2 : 20));   /* poll fast while tracing */
             continue;
         }
         if(c=='q' && pos==0 && TraceId){          /* quick-stop the trace */
@@ -864,7 +879,7 @@ static void run_sjump(const int *ids, int nids, int hz, int reps){
         /* 3) explosive push to full extension */
         servo_speed_all(0);
         fRIK(0,0,pushZ); fLIK(0,0,pushZ); rRIK(0,0,pushZ); rLIK(0,0,pushZ);
-        servo_flush(); servo_flush();
+        servo_flush(); //servo_flush();
         /* 4) airborne - hold the push, keep logging */
         int airMs = (int)(160.0f + (70.0f - crouchZ) * 1.0f);
         time_mSt = millis(); tim = 0;
