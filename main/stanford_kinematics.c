@@ -7,6 +7,7 @@
  * calibrated "Ini" pose (no horn re-flash, no dip at gait start).
  */
 #include "stanford_kinematics.h"
+#include "driver_board.h"   /* db_phys: role id -> connector id (see main.c) */
 #include <math.h>
 
 #ifndef M_PI
@@ -157,7 +158,11 @@ void stanford_kinematics_servo_deg(const sg_foot_t feet[4], float servo_deg[13])
         for (int axis = 0; axis < 3; axis++) {
             float dev_rad = jr[axis] - sk_neutral[leg][axis];
             float deg = dev_rad * SK_RAD2DEG * SK_SIGN[axis][leg];
-            servo_deg[ sk_servo_id[axis][leg] ] = deg;
+            /* sk_servo_id holds ROLE ids (tuning-era numbering); db_phys()
+             * converts to the user-facing CONNECTOR id. The driver applies
+             * db_phys() again (self-inverse), so the wire command is
+             * identical to the proven walk for any board variant. */
+            servo_deg[ db_phys(sk_servo_id[axis][leg]) ] = deg;
         }
     }
 }

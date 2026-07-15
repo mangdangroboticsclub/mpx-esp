@@ -43,40 +43,53 @@ extern "C" {
  *                3rd servo) are reversed within each leg. Net remap, verified
  *                on hardware: 1<->4, 2<->6, 3<->5, 7<->10, 8<->12, 9<->11.)
  *
- * db_phys() maps a LOGICAL servo id (what the gait / IK / CLI / calibration
- * all use, 1..12) to the PHYSICAL channel on the driver boards. Doing the
- * remap HERE - at the single hardware boundary - means every path agrees:
- * the walk, the `pos` command, sweep/swalk, position feedback and the
- * offset[] calibration all address the same servo by the same id. Set
- * SERVO_BOARD and re-flash to switch builds.
+ * db_phys() maps a user-facing servo id (CONNECTOR number, what the CLI /
+ * calibration / feedback all use, 1..12) to the electrical CHANNEL on the
+ * driver boards. It is applied at the single hardware boundary
+ * (driver_board.c), so every user-facing path agrees.
+ *
+ * The gait/IK ROLE-id tables are ALSO passed through db_phys() once (see
+ * "servo id scheme" in main.c). Because every map here is SELF-INVERSE,
+ * the double application cancels on the wire: the walk sends identical
+ * commands for any variant; only the user-facing numbering follows the
+ * board. Any new variant added here MUST stay self-inverse
+ * (db_phys(db_phys(x)) == x).
+ *
+ * The variant is a RUNTIME setting: g_servo_board (persisted in NVS as
+ * "svboard" by main.c, changed with the `board <1|2|3>` CLI command - no
+ * re-flash needed). SERVO_BOARD below is only the boot default used when
+ * nothing is stored in NVS yet.
  * ---------------------------------------------------------------------- */
 #define SERVO_BOARD 3
 
+extern int g_servo_board;   /* 1..3, defined in driver_board.c */
+
 static inline int db_phys(int logical){
-#if SERVO_BOARD == 2
-    switch(logical){
-        case 1:  return 3;   case 3:  return 1;
-        case 4:  return 6;   case 6:  return 4;
-        case 7:  return 9;   case 9:  return 7;
-        case 10: return 12;  case 12: return 10;
-        default: return logical;
+    switch(g_servo_board){
+    case 2:
+        switch(logical){
+            case 1:  return 3;   case 3:  return 1;
+            case 4:  return 6;   case 6:  return 4;
+            case 7:  return 9;   case 9:  return 7;
+            case 10: return 12;  case 12: return 10;
+            default: return logical;
+        }
+    case 3:
+        /* purple board: 1-2-3 group swapped with 4-5-6, 7-8-9 with 10-11-12,
+         * AND the hip/knee (2nd & 3rd servo) reversed within each leg. Net
+         * (verified on hardware): 1<->4, 2<->6, 3<->5, 7<->10, 8<->12, 9<->11. */
+        switch(logical){
+            case 1:  return 4;   case 4:  return 1;
+            case 2:  return 6;   case 6:  return 2;
+            case 3:  return 5;   case 5:  return 3;
+            case 7:  return 10;  case 10: return 7;
+            case 8:  return 12;  case 12: return 8;
+            case 9:  return 11;  case 11: return 9;
+            default: return logical;
+        }
+    default:
+        return logical;
     }
-#elif SERVO_BOARD == 3
-    /* purple board: 1-2-3 group swapped with 4-5-6, 7-8-9 with 10-11-12,
-     * AND the hip/knee (2nd & 3rd servo) reversed within each leg. Net
-     * (verified on hardware): 1<->4, 2<->6, 3<->5, 7<->10, 8<->12, 9<->11. */
-    switch(logical){
-        case 1:  return 4;   case 4:  return 1;
-        case 2:  return 6;   case 6:  return 2;
-        case 3:  return 5;   case 5:  return 3;
-        case 7:  return 10;  case 10: return 7;
-        case 8:  return 12;  case 12: return 8;
-        case 9:  return 11;  case 11: return 9;
-        default: return logical;
-    }
-#else
-    return logical;
-#endif
 }
 
 /* Initialise the SPI bus, the 4 driver-board devices, and the power-enable pin.

@@ -16,6 +16,10 @@
 
 #define TAG "DRVBOARD"
 
+/* Runtime board-variant select (see driver_board.h). Loaded from / persisted
+ * to NVS ("svboard") by main.c; SERVO_BOARD is only the boot default. */
+int g_servo_board = SERVO_BOARD;
+
 /* ---- pin map (same as reference board) ---- */
 #define SPI_MASTER_ID    SPI2_HOST
 #define SPI_MASTER_MOSI  11
