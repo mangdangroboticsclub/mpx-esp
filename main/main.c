@@ -168,6 +168,9 @@ static void cli_printf(const char *fmt, ...){
     va_end(ap);
 }
 
+/* plain-string sink so driver_board_scan() can write into the CLI buffer */
+static void cli_puts(const char *s){ cli_printf("%s", s); }
+
 static void cli_dump_servo(int id){
     for(int p=0; p<DB_PARAM_COUNT; p++){
         float v;
@@ -214,11 +217,31 @@ static void cli_exec(char *cmd){
                    "                    (serial only, needs 'cli on'; default: 6 50 2 3)\n"
                    "  sjump [hz reps id...]     in-place Jump PID trace -> CSV (all legs)\n"
                    "                    (serial only, needs 'cli on'; default: 50 1 2 3)\n"
+                   "  scan              probe all 4 CS lines, dump raw SPI reply (bring-up)\n"
+                   "  pintest [secs]    hold SCK/MOSI/CS0-3 low one at a time for a\n"
+                   "                    multimeter (default 3s). Serial only, needs 'cli on'.\n"
+                   "                    Detaches SPI from those pins - 'reboot' after.\n"
+                   "  reboot            restart the ESP32\n"
                    "  offsets           print all 12 servo calibration offsets (serial only)\n"
                    "  save [id]         save board config to flash\n"
                    "  restore [id]      factory defaults (RAM, then save)\n"
                    "note: pos uses RAW AT32 angle, 135 = centre, no direction flip\n");
         cli_list_params();
+
+    }else if(!strcmp(t0,"scan")){
+        driver_board_scan(cli_puts);
+
+    }else if(!strcmp(t0,"pintest")){
+        /* serial only: it runs for tens of seconds and the whole point is
+         * live output, which cli_out cannot give (it is flushed once, at
+         * the end). serial_handle_line() intercepts it before we get here. */
+        cli_printf("pintest is serial-only - run it from the USB console.\n");
+
+    }else if(!strcmp(t0,"reboot")){
+        cli_printf("rebooting...\n");
+        fputs(cli_out, stdout); fflush(stdout);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_restart();
 
     }else if(!strcmp(t0,"dump")){
         char *t1 = strtok_r(NULL," \t",&sp);
@@ -421,7 +444,19 @@ static void run_sstretch(const int *ids, int nids, int secs, int hz);
  * streaming per-servo tracking CSV, so you can PID-tune the jump. */
 static void run_sjump(const int *ids, int nids, int hz, int reps);
 
+/* live sink: straight to the console, flushed every line. Used by the
+ * long-running serial-only commands, where buffering into cli_out would
+ * hide everything until the command finished. */
+static void serial_puts_live(const char *s){ fputs(s, stdout); fflush(stdout); }
+
 static void serial_handle_line(char *line){
+    if(!strncmp(line,"pintest",7)){
+        int secs = 3;
+        sscanf(line,"pintest %d",&secs);
+        if(!CliMode){ printf("run 'cli on' first (gait would fight the SPI bus)\n"); return; }
+        driver_board_pintest(serial_puts_live, secs);
+        return;
+    }
     if(!strncmp(line,"sweep",5)){
         int sid=2, hold=800, cyc=3, hz=50;
         float lo=100, hi=200;
@@ -2101,5 +2136,8 @@ void app_main(void){
     start_webserver();
 
     xTaskCreatePinnedToCore(gait_task, "gait", 8192, NULL, 22, NULL, 1);
-    xTaskCreatePinnedToCore(console_task, "console", 4096, NULL, 5, NULL, 0);
+    /* 8k, not 4k: the CLI nests console_task -> cli_exec -> driver_board_scan
+     * -> vsnprintf, and newlib's formatter alone can want several hundred
+     * bytes. 4k left almost no margin. */
+    xTaskCreatePinnedToCore(console_task, "console", 8192, NULL, 5, NULL, 0);
 }

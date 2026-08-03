@@ -54,20 +54,36 @@ extern "C" {
 #define SERVO_BOARD 1
 
 /* ------------------------------------------------------------------------
- * NUMBER OF DRIVER BOARDS PRESENT
- *   4 = full robot (12 servos)
- *   1 = single-board bench test (servos 1..3 only, board 0 = CS GPIO 9)
+ * WHICH DRIVER BOARDS ARE FITTED  (one bit per board, not a count)
  *
- * With DB_BOARD_COUNT < 4 the SPI layer silently skips the missing boards
- * instead of timing out on every gait tick. Servos on absent boards keep
- * reporting their last cached feedback (zeros at start-up) and any command
- * addressed to them is a no-op.
+ *   bit 0 = board 0 : servos 1-3   Front Right   CS = GPIO 9
+ *   bit 1 = board 1 : servos 4-6   Front Left    CS = GPIO 10
+ *   bit 2 = board 2 : servos 7-9   Rear  Right   CS = GPIO 21
+ *   bit 3 = board 3 : servos 10-12 Rear  Left    CS = GPIO 14
  *
- * NOTE: the new "Triple_SMS_3IN1" board speaks the SAME 36-byte SPI frame
- * as the old 4IN1 board, so nothing else on the ESP side changes. Set this
- * back to 4 once all four boards are installed.
+ *   0x0F = full robot (all four boards)
+ *   0x02 = single-board bench test on CS GPIO 10 -> servos 4,5,6
+ *
+ * This used to be a plain count, which could only ever mean "the first N
+ * boards". That is wrong for bench work: `scan` found the one wired board
+ * answering on CS GPIO 10, i.e. board 1, so a count of 1 addressed board 0
+ * and every frame went to a chip select with nothing on it.
+ *
+ * Absent boards are skipped silently instead of timing out on every gait
+ * tick. Their servos keep reporting the last cached feedback (zeros at
+ * start-up) and commands addressed to them are a no-op.
+ *
+ * NOTE: the "Triple_SMS_3IN1" board speaks the SAME 36-byte SPI frame as
+ * the old 4IN1, so nothing else on the ESP side changes.
  * ---------------------------------------------------------------------- */
-#define DB_BOARD_COUNT 1
+#define DB_BOARD_MASK 0x02
+
+/* number of fitted boards (popcount of the mask) */
+static inline int db_board_count(void){
+    int n = 0;
+    for (int b = 0; b < 4; b++) if ((DB_BOARD_MASK >> b) & 1) n++;
+    return n;
+}
 
 /* ------------------------------------------------------------------------
  * POWER-ONLY MODE  (bench bring-up)
@@ -88,7 +104,7 @@ extern "C" {
  *   - the web CLI's parameter get/set and live trace return failures - use
  *     the AT32 UART CLI for those instead.
  * ---------------------------------------------------------------------- */
-#define DB_POWER_ONLY 1
+#define DB_POWER_ONLY 0
 
 /* true if board index 0..3 is physically present */
 static inline bool db_board_present(int board){
@@ -96,7 +112,7 @@ static inline bool db_board_present(int board){
     (void)board;
     return false;              /* nothing is reachable over SPI in this mode */
 #else
-    return board >= 0 && board < DB_BOARD_COUNT;
+    return board >= 0 && board < 4 && ((DB_BOARD_MASK >> board) & 1);
 #endif
 }
 
@@ -222,6 +238,23 @@ enum {
 };
 
 bool driver_board_get_live(int servo /*1..12*/, int live_id, float *out);
+
+/* ---- bring-up scan ------------------------------------------------------
+ * Probes all four chip selects with a harmless IDLE frame and reports the
+ * raw 36 bytes each one returns on MISO, with a verdict. Pass a printf-style
+ * sink (the CLI's cli_printf wrapper) or NULL to log via ESP_LOG.
+ * Safe to call at any time - it commands IDLE mode with a zero current
+ * limit, so no servo moves.                                              */
+void driver_board_scan(void (*out)(const char *line));
+
+/* ---- pin walk for multimeter tracing ------------------------------------
+ * Drives SCK, MOSI and the four CS lines as plain GPIO, one at a time:
+ * everything idles HIGH, then the pin under test is held LOW for hold_s
+ * seconds (1..30, default 3) so a multimeter can catch it.
+ *
+ * DESTRUCTIVE: this detaches those pins from the SPI peripheral, so the
+ * driver boards are unreachable afterwards. Reboot to restore.          */
+void driver_board_pintest(void (*out)(const char *line), int hold_s);
 
 #ifdef __cplusplus
 }
