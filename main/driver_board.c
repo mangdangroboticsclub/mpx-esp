@@ -36,15 +36,20 @@
 typedef struct { uint16_t mode, position; int16_t torque; uint16_t kp, kd; } servo_cmd_sub_t;
 typedef struct { uint16_t start, mode; servo_cmd_sub_t s1, s2, s3; uint16_t check_sum; } host_SMS_t;
 
-typedef struct { uint16_t status, position; int16_t torque; uint32_t res; } servo_fb_sub_t;
+/* res1 carries the NTC temperature in signed 0.1 degC (253 = 25.3 degC).
+ * res2 is still unused. Same 10-byte layout as before. */
+typedef struct { uint16_t status, position; int16_t torque; uint16_t res1, res2; } servo_fb_sub_t;
 typedef struct { uint16_t start, status; servo_fb_sub_t s1, s2, s3; uint16_t check_sum; } SMS_host_t;
 #pragma pack(pop)
 
+#if !DB_POWER_ONLY
 static spi_device_handle_t dev_left_front, dev_right_front, dev_left_rear, dev_right_rear;
+#endif
 
 /* cached feedback, index 0 == servo ID 1 */
 static uint16_t fb_position[12];
 static int16_t  fb_current[12];
+static int16_t  fb_temp_dc[12];   /* NTC temperature, 0.1 degC */
 
 /* shadow of the last commanded state per servo (deci-degrees), so a direct
  * single-servo write can resend the board frame without disturbing the
@@ -56,7 +61,14 @@ static int16_t  sh_cur[12]   = { 0 };
 /* board index (0..3) -> SPI device. Matches reference spi_read_write_bytes(). */
 static esp_err_t spi_xfer(uint8_t board, uint8_t size, uint8_t *tx, uint8_t *rx)
 {
+#if DB_POWER_ONLY
+    /* power-only bench mode: the SPI bus was never initialised */
+    (void)size; (void)tx; (void)rx; (void)board;
+    return ESP_ERR_INVALID_STATE;
+#else
     spi_transaction_t t;
+    /* bench mode: boards beyond DB_BOARD_COUNT are not fitted - skip quietly */
+    if (!db_board_present(board)) return ESP_ERR_NOT_FOUND;
     memset(&t, 0, sizeof(t));
     t.length    = (size_t)size * 8;
     t.tx_buffer = tx;
@@ -68,6 +80,7 @@ static esp_err_t spi_xfer(uint8_t board, uint8_t size, uint8_t *tx, uint8_t *rx)
         case 3: return spi_device_transmit(dev_left_rear,   &t); /* servos 10-12 RL */
         default: return ESP_FAIL;
     }
+#endif /* DB_POWER_ONLY */
 }
 
 void driver_board_power(bool on)
@@ -87,6 +100,19 @@ void driver_board_init(void)
     };
     ESP_ERROR_CHECK(gpio_config(&io));
     driver_board_power(false);
+
+#if DB_POWER_ONLY
+    /* Bench bring-up: hold the servo rail on and stop there. The SPI bus is
+     * deliberately NOT initialised, so MOSI/MISO/CLK/CS stay high-Z and the
+     * AT32 UART CLI owns the servos.
+     * (app_main already waits 1 s after this call for the rails to settle.) */
+    driver_board_power(true);
+    ESP_LOGW(TAG, "POWER-ONLY MODE: servo rail ON (GPIO %d), SPI disabled.",
+             POWER_EN_GPIO);
+    ESP_LOGW(TAG, "Drive the servos from the AT32 UART CLI (PA9/PA10, H1 pins 6/7). "
+                  "Set DB_POWER_ONLY to 0 in driver_board.h to hand control back to the ESP.");
+    return;
+#else
 
     /* SPI bus */
     spi_bus_config_t bus = {
@@ -112,7 +138,14 @@ void driver_board_init(void)
     dev.spics_io_num = SPI_MASTER_CS3; ESP_ERROR_CHECK(spi_bus_add_device(SPI_MASTER_ID, &dev, &dev_right_rear));
 
     driver_board_power(true);
-    ESP_LOGI(TAG, "driver board SPI init OK (4 boards, 12 servos)");
+    ESP_LOGI(TAG, "driver board SPI init OK (%d board(s) fitted, %d servos active)",
+             DB_BOARD_COUNT, DB_BOARD_COUNT * 3);
+#if DB_BOARD_COUNT < 4
+    ESP_LOGW(TAG, "BENCH MODE: only board 0 (CS GPIO %d, servos 1-3) is driven. "
+                  "Set DB_BOARD_COUNT to 4 in driver_board.h for the full robot.",
+             SPI_MASTER_CS1);
+#endif
+#endif /* DB_POWER_ONLY */
 }
 
 void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12])
@@ -120,7 +153,7 @@ void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12])
     host_SMS_t frame;
     SMS_host_t rx;
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < DB_BOARD_COUNT; i++) {
         const int b = i * 3;   /* first servo index of this board */
         frame.start = START_FIELD;
         frame.mode  = MODE_FIELD;
@@ -150,6 +183,7 @@ void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12])
             for (int j = 0; j < 3; j++) {
                 fb_position[b + j] = (uint16_t)((uint32_t)fb[j]->position * 1024u / 2700u);
                 fb_current[b + j]  = fb[j]->torque;   /* present motor current, mA */
+                fb_temp_dc[b + j]  = (int16_t)fb[j]->res1;  /* NTC temp, 0.1 degC */
             }
         }
     }
@@ -218,7 +252,10 @@ static bool cfg_request(uint8_t board, uint16_t op, uint16_t servo_index,
     if (!cfg_xfer(board, CFG_OP_NOP, 0, 0, 0, &rx)) return false;
     if (rx.status != START_CONFIG) return false; /* not a config response  */
     if (rx.s1.position != param_id) return false;/* echo mismatch          */
-    if (out) memcpy(out, &rx.s1.res, sizeof(float));
+    /* config responses put the float across res1+res2 (4 bytes, little
+     * endian) - unchanged by the temperature field, which only applies to
+     * SERVO feedback frames, not config responses. */
+    if (out) memcpy(out, &rx.s1.res1, sizeof(float));
     return true;
 }
 
@@ -255,9 +292,10 @@ bool driver_board_get_live(int servo, int live_id, float *out)
 static bool cfg_board_op(int board, uint16_t op)
 {
     if (board >= 0 && board <= 3)
-        return cfg_request((uint8_t)board, op, 0, 0, 0, NULL);
+        return db_board_present(board) &&
+               cfg_request((uint8_t)board, op, 0, 0, 0, NULL);
     bool ok = true;                              /* board == -1: all boards */
-    for (int b = 0; b < 4; b++)
+    for (int b = 0; b < DB_BOARD_COUNT; b++)
         ok &= cfg_request((uint8_t)b, op, 0, 0, 0, NULL);
     return ok;
 }
@@ -290,6 +328,7 @@ static bool board_resend(int board)
     for (int j = 0; j < 3; j++) {
         fb_position[b + j] = (uint16_t)((uint32_t)fb[j]->position * 1024u / 2700u);
         fb_current[b + j]  = fb[j]->torque;
+        fb_temp_dc[b + j]  = (int16_t)fb[j]->res1;
     }
     return true;
 }
@@ -323,4 +362,10 @@ uint16_t driver_board_present_position(int ch)
 {
     if (ch < 1 || ch > 12) return 0;
     return fb_position[db_phys(ch) - 1];
+}
+
+float driver_board_present_temperature(int ch)
+{
+    if (ch < 1 || ch > 12) return 0.0f;
+    return (float)fb_temp_dc[db_phys(ch) - 1] / 10.0f;
 }

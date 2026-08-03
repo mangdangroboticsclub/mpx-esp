@@ -39,9 +39,10 @@ extern "C" {
  *                plugged the other way round -> physical channels swapped
  *                1<->3, 4<->6, 7<->9, 10<->12; thighs 2,5,8,11 unchanged)
  *   3 = purple board  (same design as board 1, but the 1-2-3 group sits where
- *                4-5-6 is and 7-8-9 where 10-11-12 is, AND the hip/knee (2nd &
- *                3rd servo) are reversed within each leg. Net remap, verified
- *                on hardware: 1<->4, 2<->6, 3<->5, 7<->10, 8<->12, 9<->11.)
+ *                4-5-6 is and 7-8-9 where 10-11-12 is. The leg groups swap
+ *                straight across with NO within-leg reversal. Net remap,
+ *                verified on hardware: 1<->4, 2<->5, 3<->6, 7<->10, 8<->11,
+ *                9<->12.)
  *
  * db_phys() maps a LOGICAL servo id (what the gait / IK / CLI / calibration
  * all use, 1..12) to the PHYSICAL channel on the driver boards. Doing the
@@ -51,6 +52,53 @@ extern "C" {
  * SERVO_BOARD and re-flash to switch builds.
  * ---------------------------------------------------------------------- */
 #define SERVO_BOARD 1
+
+/* ------------------------------------------------------------------------
+ * NUMBER OF DRIVER BOARDS PRESENT
+ *   4 = full robot (12 servos)
+ *   1 = single-board bench test (servos 1..3 only, board 0 = CS GPIO 9)
+ *
+ * With DB_BOARD_COUNT < 4 the SPI layer silently skips the missing boards
+ * instead of timing out on every gait tick. Servos on absent boards keep
+ * reporting their last cached feedback (zeros at start-up) and any command
+ * addressed to them is a no-op.
+ *
+ * NOTE: the new "Triple_SMS_3IN1" board speaks the SAME 36-byte SPI frame
+ * as the old 4IN1 board, so nothing else on the ESP side changes. Set this
+ * back to 4 once all four boards are installed.
+ * ---------------------------------------------------------------------- */
+#define DB_BOARD_COUNT 1
+
+/* ------------------------------------------------------------------------
+ * POWER-ONLY MODE  (bench bring-up)
+ *
+ *   1 = the ESP32 does nothing but hold the servo power rail on (GPIO 8).
+ *       The SPI bus is never initialised and no frames are sent, so the
+ *       AT32's UART CLI has EXCLUSIVE control of the servos - your `pos`,
+ *       `tor` and `trace` commands will not be overwritten by the gait task
+ *       every 5 ms.
+ *   0 = normal operation (ESP drives the servos over SPI).
+ *
+ * Flip this one line and re-flash to switch between bench and robot.
+ *
+ * While this is 1:
+ *   - MOSI/MISO/CLK/CS stay high-Z, so nothing is injected into the AT32's
+ *     SPI slave pins. PB12 (NSS) idles high on its own pull-up = deselected.
+ *   - gait/web buttons still "work" but move nothing.
+ *   - the web CLI's parameter get/set and live trace return failures - use
+ *     the AT32 UART CLI for those instead.
+ * ---------------------------------------------------------------------- */
+#define DB_POWER_ONLY 1
+
+/* true if board index 0..3 is physically present */
+static inline bool db_board_present(int board){
+#if DB_POWER_ONLY
+    (void)board;
+    return false;              /* nothing is reachable over SPI in this mode */
+#else
+    return board >= 0 && board < DB_BOARD_COUNT;
+#endif
+}
 
 static inline int db_phys(int logical){
 #if SERVO_BOARD == 2
@@ -63,15 +111,15 @@ static inline int db_phys(int logical){
     }
 #elif SERVO_BOARD == 3
     /* purple board: 1-2-3 group swapped with 4-5-6, 7-8-9 with 10-11-12,
-     * AND the hip/knee (2nd & 3rd servo) reversed within each leg. Net
-     * (verified on hardware): 1<->4, 2<->6, 3<->5, 7<->10, 8<->12, 9<->11. */
+     * straight across with NO within-leg reversal. Net (verified on
+     * hardware): 1<->4, 2<->5, 3<->6, 7<->10, 8<->11, 9<->12. */
     switch(logical){
         case 1:  return 4;   case 4:  return 1;
-        case 2:  return 6;   case 6:  return 2;
-        case 3:  return 5;   case 5:  return 3;
+        case 2:  return 5;   case 5:  return 2;
+        case 3:  return 6;   case 6:  return 3;
         case 7:  return 10;  case 10: return 7;
-        case 8:  return 12;  case 12: return 8;
-        case 9:  return 11;  case 11: return 9;
+        case 8:  return 11;  case 11: return 8;
+        case 9:  return 12;  case 12: return 9;
         default: return logical;
     }
 #else
@@ -98,6 +146,13 @@ void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12]);
 /* Cached feedback from the last sync_write. ch = 1..12. */
 int16_t  driver_board_present_current(int ch);   /* motor current, mA (signed) */
 uint16_t driver_board_present_position(int ch);  /* SCS scale 0..1023          */
+
+/* Servo temperature in degrees Celsius, from the NTC next to each motor.
+ * Comes back inside the normal feedback frame (the old `reserved1` field), so
+ * it costs no extra SPI traffic - just call it after driver_board_sync_write()
+ * or driver_board_poll(). Requires the 3IN1 board + matching AT32 firmware;
+ * on the old 4IN1 boards there is no NTC and this reads garbage. */
+float    driver_board_present_temperature(int ch);
 
 /* ---- AT32 sms_config parameter access over SPI (web CLI) ----------------
  * Parameter ids match the AT32 UART CLI table order.
@@ -162,6 +217,7 @@ enum {
     DB_LIVE_PWM_DUTY,           /* PWM duty cycle 0..1          */
     DB_LIVE_MODE,               /* 0 idle 1 position 2 torque   */
     DB_LIVE_LOOP_COUNTER,       /* control loop tick counter    */
+    DB_LIVE_TEMPERATURE,        /* NTC servo temperature, degC  */
     DB_LIVE_COUNT
 };
 
