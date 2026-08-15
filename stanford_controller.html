@@ -50,6 +50,45 @@
           font-size:13px; padding:0 16px 22px; flex-wrap:wrap; }
   .tele b { color:var(--ink); font-variant-numeric:tabular-nums; }
   footer { color:var(--mut); font-size:11px; text-align:center; padding:0 16px 26px; line-height:1.5; }
+
+  /* ---- 12-bar servo control ---- */
+  .svbtn { background:var(--card); border:1px solid #24333f; color:var(--mut);
+           border-radius:8px; padding:5px 14px; cursor:pointer; font-size:12px;
+           transition:color .15s,border-color .15s; margin-left:auto; }
+  .svbtn:hover { color:var(--accent); border-color:var(--accent); }
+  .svbtn.on { color:var(--accent); border-color:var(--accent); background:#1a2c38; }
+  #svbar { display:none; padding:8px 16px 14px; background:var(--card);
+           border-bottom:1px solid #24333f; }
+  #svbar.open { display:block; }
+  #svbar .svhdr { display:flex; align-items:center; justify-content:space-between;
+                  margin-bottom:8px; }
+  #svbar .svhdr span { color:var(--mut); font-size:12px; }
+  .svgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
+            gap:6px; }
+  .svrow { display:flex; align-items:center; gap:6px; padding:4px 8px;
+           background:#0d151d; border-radius:6px; border:1px solid #1a2834;
+           font-size:12px; }
+  .svrow .id { color:var(--accent); font-weight:600; min-width:18px; text-align:center; }
+  .svrow .name { color:var(--mut); font-size:10px; min-width:48px; }
+  .svrow .pos { color:var(--ink); font-variant-numeric:tabular-nums; min-width:36px;
+                text-align:right; font-size:11px; }
+  .svrow .deg { color:var(--mut); font-size:10px; min-width:44px; text-align:right; }
+  .svrow input { width:48px; background:#0d151d; border:1px solid #2a3a48;
+                 color:var(--ink); border-radius:4px; padding:2px 4px; font-size:11px;
+                 text-align:center; font-variant-numeric:tabular-nums; }
+  .svrow input:focus { outline:none; border-color:var(--accent); }
+  .svrow .sbtn { background:transparent; border:1px solid #2a3a48; color:var(--mut);
+                 border-radius:4px; padding:2px 8px; cursor:pointer; font-size:10px;
+                 transition:color .15s,border-color .15s; }
+  .svrow .sbtn:hover { color:var(--accent); border-color:var(--accent); }
+  .svrow .sbtn.ok { color:var(--accent); border-color:var(--accent); }
+  #clearAllBtn { background:transparent; border:1px solid #c0392b; color:#e74c3c;
+                 border-radius:4px; padding:2px 8px; cursor:pointer; font-size:10px;
+                 transition:color .15s,border-color .15s,background .15s; }
+  #clearAllBtn:hover { background:#c0392b; color:#fff; }
+  .svrow .stat { width:6px; height:6px; border-radius:50%; background:#2a3a48;
+                 flex-shrink:0; }
+  .svrow .stat.on { background:var(--accent); box-shadow:0 0 4px rgba(22,160,133,.4); }
 </style>
 </head>
 <body>
@@ -63,6 +102,19 @@
   <input id="ip" placeholder="192.168.x.x" inputmode="decimal">
   <label>Speed cap</label>
   <span class="val" id="spd">- mm/s</span>
+  <button class="svbtn" id="svToggle" onclick="toggleServoBar()">&#9881; Servos</button>
+</div>
+
+<!-- 12-bar servo control panel -->
+<div id="svbar">
+  <div class="svhdr">
+    <span>&#9881; Servo Angles — <span id="svPollStat">offline</span></span>
+    <span style="display:flex;gap:8px;align-items:center;">
+      <span style="font-size:10px;color:var(--mut);">Click a row to fill, Set to write</span>
+      <button class="sbtn" id="clearAllBtn" onclick="clearAllOverrides()" style="font-size:10px;padding:3px 10px;">Clear All</button>
+    </span>
+  </div>
+  <div class="svgrid" id="svGrid"></div>
 </div>
 
 <div class="pads">
@@ -148,6 +200,113 @@
       .catch(function(){ spdEl.textContent=speed+' mm/s (offline)'; });
   }
   setInterval(poll, 2000); poll();
+
+  /* ========== 12-bar servo angle control ========== */
+  var svNames = ['FR Hip','FR Thigh','FR Calf',
+                 'FL Hip','FL Thigh','FL Calf',
+                 'RR Hip','RR Thigh','RR Calf',
+                 'RL Hip','RL Thigh','RL Calf'];
+  var svVals = [];             // last fetched angles per servo
+  var svOpen = false;
+  var svPollTimer = null;
+
+  function buildServoGrid(){
+    var h = '';
+    for(var i=0; i<12; i++){
+      var id = i+1;
+      h += '<div class="svrow" id="svr'+id+'" onclick="fillAngle('+id+')">'+
+           '<span class="stat" id="svs'+id+'"></span>'+
+           '<span class="id">'+id+'</span>'+
+           '<span class="name">'+svNames[i]+'</span>'+
+           '<span class="pos" id="svp'+id+'">---</span>'+
+           '<span class="deg" id="svd'+id+'">---&deg;</span>'+
+           '<input type="number" id="svi'+id+'" min="0" max="270" step="1" value="135" placeholder="deg" onclick="event.stopPropagation()">'+
+           '<button class="sbtn" id="svb'+id+'" onclick="event.stopPropagation();setServoAngle('+id+')">Set</button>'+
+           '</div>';
+    }
+    document.getElementById('svGrid').innerHTML = h;
+  }
+  buildServoGrid();
+
+  // toggle the servo bar open/closed
+  window.toggleServoBar = function(){
+    svOpen = !svOpen;
+    document.getElementById('svbar').classList.toggle('open', svOpen);
+    document.getElementById('svToggle').classList.toggle('on', svOpen);
+    if(svOpen){
+      pollAngles();
+      if(svPollTimer) clearInterval(svPollTimer);
+      svPollTimer = setInterval(pollAngles, 1000);
+    }else{
+      if(svPollTimer){ clearInterval(svPollTimer); svPollTimer = null; }
+    }
+  };
+
+  // fetch all 12 servo angles from /api/angles
+  function pollAngles(){
+    var ip=(window.__ip||ipEl.value||'').trim();
+    if(!ip){ document.getElementById('svPollStat').textContent = 'no IP'; return; }
+    fetch('http://'+ip+'/api/angles')
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d.ok || !d.angles) return;
+        document.getElementById('svPollStat').textContent = 'updated';
+        for(var i=0; i<d.angles.length; i++){
+          var a = d.angles[i];
+          var id = a.id;
+          svVals[id] = a;
+          document.getElementById('svp'+id).textContent = a.scs;
+          document.getElementById('svd'+id).textContent = a.deg.toFixed(1)+'°';
+          document.getElementById('svs'+id).classList.add('on');
+        }
+      })
+      .catch(function(){
+        document.getElementById('svPollStat').textContent = 'offline';
+        for(var id=1; id<=12; id++){
+          document.getElementById('svs'+id).classList.remove('on');
+        }
+      });
+  }
+
+  // click a servo row to fill its current angle into the input
+  window.fillAngle = function(id){
+    if(svVals[id] && svVals[id].deg !== undefined){
+      document.getElementById('svi'+id).value = Math.round(svVals[id].deg);
+    }
+  };
+
+  // clear all manual overrides, return to normal gait control
+  window.clearAllOverrides = function(){
+    var ip=(window.__ip||ipEl.value||'').trim();
+    if(!ip) return;
+    // Reset to Ini pose (calls reset_all_modes which clears manual_ovr[])
+    fetch('http://'+ip+'/ini',{mode:'no-cors'}).then(function(){
+      document.getElementById('svPollStat').textContent = 'cleared';
+    });
+  };
+
+  // set a single servo angle via /api/setangle (works with or without CLI mode)
+  window.setServoAngle = function(id){
+    var ip=(window.__ip||ipEl.value||'').trim();
+    if(!ip) return;
+    var inp = document.getElementById('svi'+id);
+    var deg = parseFloat(inp.value);
+    if(isNaN(deg) || deg<0 || deg>270){ inp.style.borderColor='#c0392b'; return; }
+    inp.style.borderColor='';
+    var btn = document.getElementById('svb'+id);
+    btn.textContent = '...';
+    fetch('http://'+ip+'/api/setangle?id='+id+'&deg='+deg.toFixed(1))
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        btn.textContent = d.ok ? 'OK' : 'Fail';
+        btn.classList.toggle('ok', d.ok);
+        setTimeout(function(){ btn.textContent = 'Set'; btn.classList.remove('ok'); }, 1200);
+      })
+      .catch(function(){
+        btn.textContent = 'Err';
+        setTimeout(function(){ btn.textContent = 'Set'; }, 1200);
+      });
+  };
 })();
 </script>
 </body>

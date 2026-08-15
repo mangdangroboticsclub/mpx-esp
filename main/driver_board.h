@@ -53,69 +53,6 @@ extern "C" {
  * ---------------------------------------------------------------------- */
 #define SERVO_BOARD 1
 
-/* ------------------------------------------------------------------------
- * WHICH DRIVER BOARDS ARE FITTED  (one bit per board, not a count)
- *
- *   bit 0 = board 0 : servos 1-3   Front Right   CS = GPIO 9
- *   bit 1 = board 1 : servos 4-6   Front Left    CS = GPIO 10
- *   bit 2 = board 2 : servos 7-9   Rear  Right   CS = GPIO 21
- *   bit 3 = board 3 : servos 10-12 Rear  Left    CS = GPIO 14
- *
- *   0x0F = full robot (all four boards)
- *   0x02 = single-board bench test on CS GPIO 10 -> servos 4,5,6
- *
- * This used to be a plain count, which could only ever mean "the first N
- * boards". That is wrong for bench work: `scan` found the one wired board
- * answering on CS GPIO 10, i.e. board 1, so a count of 1 addressed board 0
- * and every frame went to a chip select with nothing on it.
- *
- * Absent boards are skipped silently instead of timing out on every gait
- * tick. Their servos keep reporting the last cached feedback (zeros at
- * start-up) and commands addressed to them are a no-op.
- *
- * NOTE: the "Triple_SMS_3IN1" board speaks the SAME 36-byte SPI frame as
- * the old 4IN1, so nothing else on the ESP side changes.
- * ---------------------------------------------------------------------- */
-#define DB_BOARD_MASK 0x02
-
-/* number of fitted boards (popcount of the mask) */
-static inline int db_board_count(void){
-    int n = 0;
-    for (int b = 0; b < 4; b++) if ((DB_BOARD_MASK >> b) & 1) n++;
-    return n;
-}
-
-/* ------------------------------------------------------------------------
- * POWER-ONLY MODE  (bench bring-up)
- *
- *   1 = the ESP32 does nothing but hold the servo power rail on (GPIO 8).
- *       The SPI bus is never initialised and no frames are sent, so the
- *       AT32's UART CLI has EXCLUSIVE control of the servos - your `pos`,
- *       `tor` and `trace` commands will not be overwritten by the gait task
- *       every 5 ms.
- *   0 = normal operation (ESP drives the servos over SPI).
- *
- * Flip this one line and re-flash to switch between bench and robot.
- *
- * While this is 1:
- *   - MOSI/MISO/CLK/CS stay high-Z, so nothing is injected into the AT32's
- *     SPI slave pins. PB12 (NSS) idles high on its own pull-up = deselected.
- *   - gait/web buttons still "work" but move nothing.
- *   - the web CLI's parameter get/set and live trace return failures - use
- *     the AT32 UART CLI for those instead.
- * ---------------------------------------------------------------------- */
-#define DB_POWER_ONLY 0
-
-/* true if board index 0..3 is physically present */
-static inline bool db_board_present(int board){
-#if DB_POWER_ONLY
-    (void)board;
-    return false;              /* nothing is reachable over SPI in this mode */
-#else
-    return board >= 0 && board < 4 && ((DB_BOARD_MASK >> board) & 1);
-#endif
-}
-
 static inline int db_phys(int logical){
 #if SERVO_BOARD == 2
     switch(logical){
@@ -138,8 +75,94 @@ static inline int db_phys(int logical){
         case 9:  return 12;  case 12: return 9;
         default: return logical;
     }
+
+#elif SERVO_BOARD == 4  //White pupper  -   Already 5 ports are broken
+    /* abduction <-> knee (calf) swap: calf servo plugged into abduction port.
+     * 1<->3, 4<->6, 7<->9, 10<->12; hips 2,5,8,11 unchanged. */
+    switch(logical){
+        // 8 servos connected: 4 calves (3,6,9,12) + 4 thighs (2,5,8,11).
+        // 4 abductions (1,4,7,10) on broken ports (3,12,9,8,6) — no servo.
+        // Port 1→Calf3  Port 2→Thigh2  Port 4→Calf6  Port 5→Thigh5
+        // Port 6→Thigh8  Port 7→Calf9  Port 10→Calf12  Port 11→Thigh11
+        case 1:  return 3;   // FR Abd   → physical 3 (broken)
+        case 2:  return 2;   // FR Thigh → physical 2
+        case 3:  return 1;   // FR Calf  → physical 1
+        case 4:  return 12;  // FL Abd   → physical 12 (broken)
+        case 5:  return 5;   // FL Thigh → physical 5
+        case 6:  return 4;   // FL Calf  → physical 4
+        case 7:  return 9;   // RR Abd   → physical 9 (broken)
+        case 8:  return 6;   // RR Thigh → physical 6 (cross-board: FL board CS10)
+        case 9:  return 7;   // RR Calf  → physical 7
+        case 10: return 8;   // RL Abd   → physical 8 (broken)
+        case 11: return 11;  // RL Thigh → physical 11
+        case 12: return 10;  // RL Calf  → physical 10
+        default: return logical;
+    }
+
+    #elif SERVO_BOARD == 5  // White pupper (ports 4,5,6,8 broken; abduction servos unused)
+    switch(logical){
+        case 6:  return 3;   // logical  6 (calf)  → physical 3
+        case 5:  return 2;   // logical  5 (thigh) → physical 2
+        case 3:  return 1;   // logical  3 (calf)  → physical 1
+        case 2:  return 7;   // logical  2 (thigh) → physical 7
+        case 8:  return 11;  // logical  8 (thigh) → physical 11
+        case 9:  return 9;   // logical  9 (calf)  → physical 9
+        case 11: return 12;  // logical 11 (thigh) → physical 12
+        case 12: return 10;  // logical 12 (calf)  → physical 10
+        case 1:  return 4;   // logical  1 (abd)   → physical 4  (broken)
+        case 4:  return 5;   // logical  4 (abd)   → physical 5  (broken)
+        case 7:  return 6;   // logical  7 (abd)   → physical 6  (broken)
+        case 10: return 8;   // logical 10 (abd)   → physical 8  (broken)
+        default: return logical;
+    }
+
 #else
     return logical;
+#endif
+}
+
+/* Inverse: given a PHYSICAL channel (1..12), return the LOGICAL servo (1..12)
+ * that is wired to it. Used by driver_board_sync_write() to route pos[] data.
+ * Unlike db_phys(), this is NOT required to be symmetric — it handles
+ * cross-board wiring (e.g. RR servo plugged into the FL board). */
+static inline int db_phys_inv(int physical){
+#if SERVO_BOARD == 5
+    switch(physical){
+        case 1:  return 3;   // physical 1  → logical  3 (calf)
+        case 2:  return 5;   // physical 2  → logical  5 (thigh)
+        case 3:  return 6;   // physical 3  → logical  6 (calf)
+        case 4:  return 1;   // physical 4  → logical  1 (abd, broken)
+        case 5:  return 4;   // physical 5  → logical  4 (abd, broken)
+        case 6:  return 7;   // physical 6  → logical  7 (abd, broken)
+        case 7:  return 2;   // physical 7  → logical  2 (thigh)
+        case 8:  return 10;  // physical 8  → logical 10 (abd, broken)
+        case 9:  return 9;   // physical 9  → logical  9 (calf)
+        case 10: return 12;  // physical 10 → logical 12 (calf)
+        case 11: return 8;   // physical 11 → logical  8 (thigh)
+        case 12: return 11;  // physical 12 → logical 11 (thigh)
+        default: return physical;
+    }
+#else
+    // original mapping for SERVO_BOARD 1 (default)
+    switch(physical){
+        // FR board (CS9): ports 1,2,3
+        case 1:  return 1;   // FR Calf  -> logical 3
+        case 2:  return 2;   // FR Thigh -> logical 2
+        case 3:  return 3;   // broken   -> logical 1 (FR Abd, no servo)
+        // FL board (CS10): ports 4,5,6
+        case 4:  return 4;   // FL Calf  -> logical 6
+        case 5:  return 5;   // FL Thigh -> logical 5
+        case 6:  return 6;   // RR Thigh -> logical 8 (cross-board!)
+        // RR board (CS21): ports 7,8,9
+        case 7:  return 7;   // RR Calf  -> logical 9
+        case 8:  return 8;  // broken   -> logical 10 (RL Abd, no servo)
+        case 9:  return 9;   // broken   -> logical 7 (RR Abd, no servo)
+        // RL board (CS14): ports 10,11,12
+        case 10: return 10;  // RL Calf  -> logical 12
+        case 11: return 11;  // RL Thigh -> logical 11
+        case 12: return 12;   // broken   -> logical 4 (FL Abd, no servo)
+        default: return physical;
+    }
 #endif
 }
 
@@ -163,12 +186,27 @@ void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12]);
 int16_t  driver_board_present_current(int ch);   /* motor current, mA (signed) */
 uint16_t driver_board_present_position(int ch);  /* SCS scale 0..1023          */
 
-/* Servo temperature in degrees Celsius, from the NTC next to each motor.
- * Comes back inside the normal feedback frame (the old `reserved1` field), so
- * it costs no extra SPI traffic - just call it after driver_board_sync_write()
- * or driver_board_poll(). Requires the 3IN1 board + matching AT32 firmware;
- * on the old 4IN1 boards there is no NTC and this reads garbage. */
-float    driver_board_present_temperature(int ch);
+/* ---- NTC servo temperature ---------------------------------------------
+ * The AT32 firmware samples one 10k NTC per servo (MTA10103F3380F00, 10k
+ * pull-up to 3V3, NTC to GND) at ~22 Hz and ships the reading in the
+ * feedback frame's reserved1 field as a SIGNED value in 0.1 degC
+ * (253 => 25.3 degC).
+ *
+ * That field rides along on EVERY feedback frame, so this cache is
+ * refreshed FOR FREE by driver_board_sync_write() while the gait runs -
+ * zero extra SPI traffic. When the gait is parked (CLI mode) refresh it
+ * with driver_board_poll() / driver_board_poll_board().
+ *
+ * Returns degC, or DB_TEMP_INVALID if that servo has never answered.     */
+#define DB_TEMP_INVALID  (-273.0f)
+
+float driver_board_present_temperature(int ch);  /* degC, ch = 1..12 */
+
+/* Refresh the whole feedback cache (position / current / temperature) for
+ * ONE board by resending its last commanded frame. board = 0..3 in
+ * PHYSICAL board order (FR, FL, RR, RL). Setpoints are unchanged, so this
+ * is safe while parked in CLI mode - an idle servo stays idle. */
+bool driver_board_poll_board(int board /*0..3*/);
 
 /* ---- AT32 sms_config parameter access over SPI (web CLI) ----------------
  * Parameter ids match the AT32 UART CLI table order.
@@ -233,28 +271,11 @@ enum {
     DB_LIVE_PWM_DUTY,           /* PWM duty cycle 0..1          */
     DB_LIVE_MODE,               /* 0 idle 1 position 2 torque   */
     DB_LIVE_LOOP_COUNTER,       /* control loop tick counter    */
-    DB_LIVE_TEMPERATURE,        /* NTC servo temperature, degC  */
+    DB_LIVE_TEMPERATURE_C,      /* NTC servo temperature, degC  */
     DB_LIVE_COUNT
 };
 
 bool driver_board_get_live(int servo /*1..12*/, int live_id, float *out);
-
-/* ---- bring-up scan ------------------------------------------------------
- * Probes all four chip selects with a harmless IDLE frame and reports the
- * raw 36 bytes each one returns on MISO, with a verdict. Pass a printf-style
- * sink (the CLI's cli_printf wrapper) or NULL to log via ESP_LOG.
- * Safe to call at any time - it commands IDLE mode with a zero current
- * limit, so no servo moves.                                              */
-void driver_board_scan(void (*out)(const char *line));
-
-/* ---- pin walk for multimeter tracing ------------------------------------
- * Drives SCK, MOSI and the four CS lines as plain GPIO, one at a time:
- * everything idles HIGH, then the pin under test is held LOW for hold_s
- * seconds (1..30, default 3) so a multimeter can catch it.
- *
- * DESTRUCTIVE: this detaches those pins from the SPI peripheral, so the
- * driver boards are unreachable afterwards. Reboot to restore.          */
-void driver_board_pintest(void (*out)(const char *line), int hold_s);
 
 #ifdef __cplusplus
 }

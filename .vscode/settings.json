@@ -8,5 +8,5 @@
     "--compile-commands-dir=c:\\esp6\\projects\\minipupperesp\\build"
   ],
   "idf.flashType": "UART",
-  "idf.portWin": "COM7"
+  "idf.portWin": "COM3"
 }
